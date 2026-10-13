@@ -55,7 +55,10 @@ def configure_logging(config: AppConfig) -> logging.Logger:
     redactor = SecretRedactingFilter(config.secret_values())
     formatter = logging.Formatter(_LOG_FORMAT)
 
+    # O terminal é a interface de conversa: só avisos e erros aparecem nele.
+    # O registro completo (conforme AEGIS_LOG_LEVEL) fica no arquivo de log.
     console = logging.StreamHandler(sys.stderr)
+    console.setLevel(logging.WARNING)
     console.setFormatter(formatter)
     console.addFilter(redactor)
     logger.addHandler(console)

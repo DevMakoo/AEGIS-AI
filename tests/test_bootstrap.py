@@ -20,7 +20,12 @@ from core.state import AppStatus
         "app",
         "app.main",
         "app.bootstrap",
+        "app.terminal",
         "core",
+        "core.command",
+        "core.command_registry",
+        "core.command_handlers",
+        "core.conversation",
         "core.config",
         "core.logging_config",
         "core.exceptions",
@@ -80,15 +85,32 @@ def test_secrets_are_redacted_from_logs(test_environ: dict[str, str]) -> None:
     assert REDACTED in content
 
 
-def test_main_prints_name_and_version(
+def test_console_shows_only_warnings_and_errors(
     test_environ: dict[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    exit_code = main(environ=test_environ, env_file=None)
+    app = bootstrap(load_config(environ=test_environ, env_file=None))
 
-    out = capsys.readouterr().out
+    app.logger.warning("Aviso visível.")
+    app.shutdown()
+
+    err = capsys.readouterr().err
+    assert "Aviso visível." in err
+    assert "Aplicação inicializada." not in err
+
+
+def test_main_prints_name_and_version(test_environ: dict[str, str]) -> None:
+    output: list[str] = []
+
+    exit_code = main(
+        environ=test_environ,
+        env_file=None,
+        input_fn=lambda prompt: "sair",
+        output_fn=output.append,
+    )
+
     assert exit_code == EXIT_OK
-    assert f"{APP_NAME} v{__version__}" in out
-    assert "inicializada" in out
+    assert output[0] == f"{APP_NAME} v{__version__}"
+    assert "Sistema inicializado." in output
 
 
 def test_main_reports_invalid_config(capsys: pytest.CaptureFixture[str]) -> None:

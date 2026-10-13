@@ -15,3 +15,15 @@ class StartupError(AegisError):
 
 class InvalidStateTransitionError(AegisError):
     """Transição de estado da aplicação não permitida."""
+
+
+class CommandRegistrationError(AegisError):
+    """Comando inválido ou em conflito com outro já registrado."""
+
+
+class CommandError(AegisError):
+    """Falha esperada durante a execução de um comando, com mensagem para o usuário."""
+
+
+class SessionClosedError(AegisError):
+    """Tentativa de usar uma sessão de conversa já encerrada."""
