@@ -1,0 +1,3 @@
+# Dependências de execução do AEGIS (versões fixadas para reprodutibilidade).
+# Os intervalos compatíveis estão declarados em pyproject.toml.
+python-dotenv==1.2.4

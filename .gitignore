@@ -1,0 +1,34 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Segredos e configuração local
+.env
+.env.*
+!.env.example
+*.local.toml
+*.local.json
+.vscode/
+.idea/
+
+# Testes, lint e cobertura
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Logs gerados (mantém a pasta)
+logs/*
+!logs/.gitkeep
+*.log
+
+# Build e distribuição
+build/
+dist/
