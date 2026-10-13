@@ -6,6 +6,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from ai.factory import build_ai
 from app import APP_NAME, __version__
 from app.bootstrap import bootstrap
 from app.terminal import InputFn, OutputFn, run_terminal
@@ -41,7 +42,14 @@ def main(
         return EXIT_STARTUP_ERROR
 
     try:
-        session = ConversationSession(build_default_registry(), app.state, app_version=__version__)
+        ai_setup = build_ai(config)
+        session = ConversationSession(
+            build_default_registry(),
+            app.state,
+            app_version=__version__,
+            ai=ai_setup.service,
+            ai_unavailable_description=ai_setup.description,
+        )
         try:
             run_terminal(
                 session,

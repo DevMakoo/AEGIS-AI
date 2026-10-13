@@ -35,6 +35,7 @@ class CommandContext:
     session_started_at: datetime
     commands_handled: int
     available_commands: tuple[Command, ...]
+    ai_status: str = "desativada"
 
 
 type CommandHandler = Callable[[CommandContext], str]

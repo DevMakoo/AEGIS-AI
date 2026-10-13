@@ -17,6 +17,12 @@ from core.state import AppStatus
 @pytest.mark.parametrize(
     "module",
     [
+        "ai.provider",
+        "ai.ollama",
+        "ai.history",
+        "ai.prompts",
+        "ai.service",
+        "ai.factory",
         "app",
         "app.main",
         "app.bootstrap",

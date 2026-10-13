@@ -84,6 +84,7 @@ def handle_status(context: CommandContext) -> str:
             f"- Estado: {label}",
             f"- Sessão ativa {format_duration(context.now - context.session_started_at)}",
             f"- Comandos atendidos nesta sessão: {context.commands_handled}",
+            f"- Conversa inteligente: {context.ai_status}",
         ]
     )
 
@@ -111,7 +112,7 @@ DEFAULT_COMMANDS: tuple[Command, ...] = (
         name="status",
         description="Mostra o estado atual do AEGIS.",
         handler=handle_status,
-        aliases=("estado", "como você está"),
+        aliases=("estado",),
     ),
     Command(
         name="hora",
@@ -129,7 +130,9 @@ DEFAULT_COMMANDS: tuple[Command, ...] = (
         name="sair",
         description="Encerra a sessão.",
         handler=handle_exit,
-        aliases=("encerrar", "tchau", "até logo"),
+        # Sem despedidas naturais ("tchau", "até logo"): com a IA habilitada elas são
+        # conversa e não devem encerrar a sessão sem querer.
+        aliases=("encerrar",),
         ends_session=True,
     ),
 )

@@ -65,6 +65,7 @@ def test_status_when_running() -> None:
     assert "Estado: em execução" in reply
     assert "Sessão ativa há 3 minutos" in reply
     assert "Comandos atendidos nesta sessão: 2" in reply
+    assert "Conversa inteligente: desativada" in reply
 
 
 def test_status_does_not_claim_normal_operation_when_not_running() -> None:
@@ -111,3 +112,17 @@ def test_format_duration(elapsed: timedelta, expected: str) -> None:
 
 def test_exit_message() -> None:
     assert handle_exit(_context()) == "Encerrando a sessão. Até logo!"
+
+
+def test_status_shows_ai_state_from_context() -> None:
+    context = CommandContext(
+        now=FIXED_NOW,
+        app_version="9.9.9",
+        app_status=AppStatus.RUNNING,
+        session_started_at=FIXED_NOW,
+        commands_handled=0,
+        available_commands=DEFAULT_COMMANDS,
+        ai_status="habilitada (Ollama, modelo llama3.2)",
+    )
+
+    assert "- Conversa inteligente: habilitada (Ollama, modelo llama3.2)" in handle_status(context)

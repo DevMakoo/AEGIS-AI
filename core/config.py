@@ -5,16 +5,24 @@ Ordem de precedência (da menor para a maior):
 2. Arquivo ``.env`` na raiz do projeto (opcional).
 3. Variáveis de ambiente do processo.
 
+Uma variável presente no ambiente do processo prevalece sobre o ``.env`` mesmo
+quando está vazia — a mesma regra de ``python-dotenv`` (``override=False``). Valores
+vazios ou só com espaços, venham de onde vierem, equivalem a "não definido" e usam
+o padrão. Exemplo: ``.env`` com ``AEGIS_AI_ENABLED=true`` e processo com
+``AEGIS_AI_ENABLED=`` (vazio) resulta em ``false`` (padrão).
+
 Todas as variáveis usam o prefixo ``AEGIS_``.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
@@ -27,6 +35,10 @@ DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
 VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 SUPPORTED_LANGUAGES = frozenset({"pt-BR"})
 
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+AI_TIMEOUT_RANGE = (1.0, 600.0)
+AI_HISTORY_RANGE = (2, 200)
+
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on", "sim"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off", "nao", "não"})
 
@@ -35,6 +47,29 @@ class Environment(StrEnum):
     DEVELOPMENT = "development"
     TEST = "test"
     PRODUCTION = "production"
+
+
+class AIProviderName(StrEnum):
+    """Provedores de IA suportados. Novos provedores (ex.: online) entram aqui e em
+    ``ai/factory.py``; valores desconhecidos são rejeitados, nunca substituídos."""
+
+    OLLAMA = "ollama"
+
+
+@dataclass(frozen=True, slots=True)
+class AIConfig:
+    enabled: bool = False
+    provider: AIProviderName = AIProviderName.OLLAMA
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+    # Sem padrão: não presumimos que algum modelo esteja instalado.
+    ollama_model: str | None = None
+    # Hosts fora do loopback exigem autorização explícita.
+    ollama_allow_remote: bool = False
+    timeout_seconds: float = 60.0
+    # Mensagens de usuário/assistente mantidas (a mensagem de sistema não conta).
+    max_history_messages: int = 20
+    # ``None`` usa a mensagem de sistema padrão de ``ai/prompts.py``.
+    system_prompt: str | None = None
 
 
 class SecretStr:
@@ -68,7 +103,8 @@ class AppConfig:
     log_dir: Path = DEFAULT_LOG_DIR
     log_to_file: bool = True
     language: str = "pt-BR"
-    # Reservado para a integração com IA (fase futura); não é usado nesta fase.
+    ai: AIConfig = field(default_factory=AIConfig)
+    # Reservado para um provedor online (fase futura); não é usado nesta fase.
     ai_api_key: SecretStr | None = field(default=None, repr=False)
 
     def secret_values(self) -> tuple[str, ...]:
@@ -105,8 +141,125 @@ def load_config(
         log_dir=_parse_path(get("LOG_DIR"), defaults.log_dir),
         log_to_file=_parse_bool("AEGIS_LOG_TO_FILE", get("LOG_TO_FILE"), defaults.log_to_file),
         language=_parse_language(get("LANGUAGE"), defaults.language),
+        ai=_parse_ai(get, defaults.ai),
         ai_api_key=SecretStr(key) if (key := get("AI_API_KEY")) else None,
     )
+
+
+def _parse_ai(get: Callable[[str], str | None], defaults: AIConfig) -> AIConfig:
+    allow_remote = _parse_bool(
+        "AEGIS_OLLAMA_ALLOW_REMOTE", get("OLLAMA_ALLOW_REMOTE"), defaults.ollama_allow_remote
+    )
+    return AIConfig(
+        enabled=_parse_bool("AEGIS_AI_ENABLED", get("AI_ENABLED"), defaults.enabled),
+        provider=_parse_provider(get("AI_PROVIDER"), defaults.provider),
+        ollama_base_url=_parse_ollama_url(
+            get("OLLAMA_BASE_URL"), defaults.ollama_base_url, allow_remote=allow_remote
+        ),
+        ollama_model=_parse_model(get("OLLAMA_MODEL")),
+        ollama_allow_remote=allow_remote,
+        timeout_seconds=_parse_float_in_range(
+            "AEGIS_AI_TIMEOUT_SECONDS",
+            get("AI_TIMEOUT_SECONDS"),
+            defaults.timeout_seconds,
+            AI_TIMEOUT_RANGE,
+        ),
+        max_history_messages=_parse_int_in_range(
+            "AEGIS_AI_MAX_HISTORY_MESSAGES",
+            get("AI_MAX_HISTORY_MESSAGES"),
+            defaults.max_history_messages,
+            AI_HISTORY_RANGE,
+        ),
+        system_prompt=get("AI_SYSTEM_PROMPT"),
+    )
+
+
+def _parse_provider(raw: str | None, default: AIProviderName) -> AIProviderName:
+    if raw is None:
+        return default
+    try:
+        return AIProviderName(raw.lower())
+    except ValueError:
+        options = ", ".join(p.value for p in AIProviderName)
+        raise ConfigError(
+            f"AEGIS_AI_PROVIDER não suportado: '{raw}'. Valores aceitos: {options}."
+        ) from None
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _parse_ollama_url(raw: str | None, default: str, *, allow_remote: bool) -> str:
+    value = default if raw is None else raw
+    name = "AEGIS_OLLAMA_BASE_URL"
+    try:
+        parts = urlsplit(value)
+        _ = parts.port  # levanta ValueError se a porta for inválida
+    except ValueError:
+        raise ConfigError(f"{name} inválido: '{value}'.") from None
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ConfigError(f"{name} inválido: '{value}'. Use http(s)://host:porta.")
+    if "@" in parts.netloc:
+        raise ConfigError(f"{name} não pode conter usuário ou senha.")
+    if parts.query or parts.fragment:
+        raise ConfigError(f"{name} não pode conter parâmetros (?...) ou fragmentos (#...).")
+    if not allow_remote and not _is_loopback(parts.hostname.lower()):
+        raise ConfigError(
+            f"{name} aponta para um host não local ('{parts.hostname}'). As mensagens sairiam "
+            "deste computador; para permitir isso de forma explícita, defina "
+            "AEGIS_OLLAMA_ALLOW_REMOTE=true."
+        )
+    # Normalização feita só sobre o caminho, depois das validações de host: não altera
+    # esquema, host ou porta. Aceita a raiz, um prefixo (proxy reverso) ou URLs que já
+    # terminam em /api ou /api/chat, evitando /api/api/chat.
+    path = parts.path.rstrip("/")
+    for suffix in ("/api/chat", "/api"):
+        if path.endswith(suffix):
+            path = path.removesuffix(suffix)
+            break
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def _parse_model(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    if any(c.isspace() for c in raw):
+        raise ConfigError(f"AEGIS_OLLAMA_MODEL inválido: '{raw}'. Não use espaços.")
+    return raw
+
+
+def _parse_float_in_range(
+    name: str, raw: str | None, default: float, bounds: tuple[float, float]
+) -> float:
+    if raw is None:
+        return default
+    try:
+        value = float(raw.replace(",", "."))
+    except ValueError:
+        raise ConfigError(f"{name} inválido: '{raw}'. Use um número.") from None
+    low, high = bounds
+    if not low <= value <= high:  # também rejeita nan
+        raise ConfigError(f"{name} fora do intervalo: '{raw}'. Use entre {low:g} e {high:g}.")
+    return value
+
+
+def _parse_int_in_range(name: str, raw: str | None, default: int, bounds: tuple[int, int]) -> int:
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigError(f"{name} inválido: '{raw}'. Use um número inteiro.") from None
+    low, high = bounds
+    if not low <= value <= high:
+        raise ConfigError(f"{name} fora do intervalo: '{raw}'. Use entre {low} e {high}.")
+    return value
 
 
 def _parse_environment(raw: str | None, default: Environment) -> Environment:

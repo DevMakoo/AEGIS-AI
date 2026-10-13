@@ -6,14 +6,23 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from ai.service import AIService
 from core.command import Command, CommandContext
 from core.command_handlers import build_default_registry
 from core.command_registry import CommandRegistry
 from core.config import load_config
 from core.conversation import UNKNOWN_COMMAND_REPLY, ConversationSession
-from core.exceptions import CommandError, SessionClosedError
+from core.exceptions import (
+    AIModelNotFoundError,
+    AIResponseError,
+    AITimeoutError,
+    AIUnavailableError,
+    CommandError,
+    SessionClosedError,
+)
 from core.logging_config import LOG_FILE_NAME, configure_logging
 from core.state import ApplicationState, AppStatus
+from tests.helpers import FakeProvider
 
 
 class FakeClock:
@@ -170,3 +179,161 @@ def test_logs_record_commands_but_not_user_text(
     assert "Sessão de conversa encerrada" in content
     assert "hunter2" not in content
     assert "senha" not in content
+
+
+def _ai_session(running_state: ApplicationState, provider: FakeProvider) -> ConversationSession:
+    service = AIService(provider, system_prompt="regras", max_history_messages=10)
+    return ConversationSession(
+        build_default_registry(), running_state, app_version="0.1.0", ai=service
+    )
+
+
+def test_commands_keep_priority_over_ai(running_state: ApplicationState) -> None:
+    provider = FakeProvider()
+    session = _ai_session(running_state, provider)
+
+    for message in ("ajuda", "  STATUS ", "que horas são?", "Dia", "comandos"):
+        session.handle(message)
+
+    assert provider.calls == []
+    assert session.commands_handled == 5
+
+
+def test_unknown_input_goes_to_ai_only_when_enabled(running_state: ApplicationState) -> None:
+    provider = FakeProvider("Olá! Sou o AEGIS.")
+    with_ai = _ai_session(running_state, provider)
+    without_ai = ConversationSession(build_default_registry(), running_state, app_version="0.1.0")
+
+    assert with_ai.handle("Bom dia, tudo bem?") == "Olá! Sou o AEGIS."
+    assert without_ai.handle("Bom dia, tudo bem?") == UNKNOWN_COMMAND_REPLY
+    assert [m.content for m in provider.calls[0]][-1] == "Bom dia, tudo bem?"
+    assert with_ai.commands_handled == 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        AIUnavailableError("off"),
+        AIModelNotFoundError("x"),
+        AITimeoutError("t"),
+        AIResponseError("r"),
+        ZeroDivisionError("bug no provedor"),
+    ],
+)
+def test_ai_failures_keep_session_and_commands_working(
+    running_state: ApplicationState, error: BaseException
+) -> None:
+    session = _ai_session(running_state, FakeProvider(error))
+
+    reply = session.handle("conte uma piada")
+
+    assert reply is not None
+    assert "Traceback" not in reply
+    assert session.active
+    assert (session.handle("hora") or "").startswith("Agora são ")
+    assert session.handle("sair") == "Encerrando a sessão. Até logo!"
+
+
+@pytest.mark.parametrize(
+    "model_reply",
+    [
+        "sair",
+        "ajuda",
+        "__import__('os').system('calc')",
+        "Start-Process notepad",
+        r"C:\Windows\System32\calc.exe",
+    ],
+)
+def test_model_reply_is_never_executed_nor_treated_as_command(
+    running_state: ApplicationState, monkeypatch: pytest.MonkeyPatch, model_reply: str
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Tentativa de execução externa")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "system", forbidden)
+    monkeypatch.setattr(os, "startfile", forbidden, raising=False)
+    session = _ai_session(running_state, FakeProvider(model_reply))
+
+    reply = session.handle("diga algo")
+
+    assert reply == model_reply  # devolvido apenas como texto
+    assert session.active  # "sair" vindo do modelo não encerra a sessão
+    assert session.commands_handled == 0
+
+
+def test_status_reports_real_ai_state(running_state: ApplicationState) -> None:
+    session = _ai_session(running_state, FakeProvider(AIUnavailableError("off")))
+    disabled = ConversationSession(build_default_registry(), running_state, app_version="0.1.0")
+
+    session.handle("olá")
+    status = session.handle("status")
+
+    assert status is not None
+    assert "Conversa inteligente: habilitada (Falso, modelo modelo-teste)" in status
+    assert "última tentativa falhou: Falso inacessível" in status
+    assert "Error" not in status
+    assert "Conversa inteligente: desativada" in (disabled.handle("status") or "")
+
+
+@pytest.mark.parametrize("phrase", ["como você está", "Como você está?", "tchau", "Até logo!"])
+def test_removed_aliases_now_reach_the_ai(running_state: ApplicationState, phrase: str) -> None:
+    provider = FakeProvider("resposta da IA")
+    session = _ai_session(running_state, provider)
+
+    assert session.handle(phrase) == "resposta da IA"
+    assert session.active
+    assert provider.calls[0][-1].content == phrase.strip()
+    assert session.commands_handled == 0
+
+
+@pytest.mark.parametrize("phrase", ["tchau", "até logo", "como você está"])
+def test_removed_aliases_are_unknown_without_ai(session: ConversationSession, phrase: str) -> None:
+    assert session.handle(phrase) == UNKNOWN_COMMAND_REPLY
+    assert session.active
+
+
+@pytest.mark.parametrize("command", ["sair", "  SAIR ", "Sair!", "encerrar"])
+def test_explicit_exit_still_ends_session_with_ai(
+    running_state: ApplicationState, command: str
+) -> None:
+    provider = FakeProvider()
+    session = _ai_session(running_state, provider)
+
+    assert session.handle(command) == "Encerrando a sessão. Até logo!"
+    assert not session.active
+    assert provider.calls == []
+
+
+def test_status_alias_estado_still_works(running_state: ApplicationState) -> None:
+    session = _ai_session(running_state, FakeProvider())
+
+    assert (session.handle("estado") or "").startswith("Estou funcionando normalmente.")
+
+
+def test_closing_session_discards_ai_history(running_state: ApplicationState) -> None:
+    service = AIService(FakeProvider("r"), system_prompt="regras", max_history_messages=10)
+    session = ConversationSession(
+        build_default_registry(), running_state, app_version="0.1.0", ai=service
+    )
+    session.handle("pergunta")
+    assert len(service.history) == 2
+
+    session.handle("sair")
+
+    assert len(service.history) == 0
+
+
+def test_ai_flow_logs_sizes_but_not_contents(
+    test_environ: dict[str, str], running_state: ApplicationState
+) -> None:
+    config = load_config(environ=test_environ, env_file=None)
+    configure_logging(config)
+    session = _ai_session(running_state, FakeProvider("RESPOSTA-PRIVADA"))
+
+    session.handle("MENSAGEM-PRIVADA do usuário")
+    session.handle("sair")
+
+    content = (config.log_dir / LOG_FILE_NAME).read_text(encoding="utf-8")
+    assert "Entrada encaminhada à IA (27 caracteres)." in content
+    assert "PRIVADA" not in content

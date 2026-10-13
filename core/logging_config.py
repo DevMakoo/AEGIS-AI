@@ -14,6 +14,10 @@ LOGGER_NAME = "aegis"
 LOG_FILE_NAME = "aegis.log"
 REDACTED = "***REDACTED***"
 
+# Use em ``extra=FILE_ONLY`` para registros de diagnóstico que não devem aparecer
+# no terminal do usuário (continuam indo para o arquivo de log).
+FILE_ONLY = {"aegis_file_only": True}
+
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 _MAX_LOG_BYTES = 1_000_000
 _LOG_BACKUP_COUNT = 3
@@ -39,6 +43,13 @@ class SecretRedactingFilter(logging.Filter):
         return True
 
 
+class _ConsoleVisibilityFilter(logging.Filter):
+    """Oculta do terminal apenas os registros marcados com ``FILE_ONLY``."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not getattr(record, "aegis_file_only", False)
+
+
 def get_logger(name: str | None = None) -> logging.Logger:
     """Retorna o logger raiz do AEGIS ou um logger filho (ex.: ``aegis.voice``)."""
     return logging.getLogger(LOGGER_NAME if name is None else f"{LOGGER_NAME}.{name}")
@@ -60,6 +71,7 @@ def configure_logging(config: AppConfig) -> logging.Logger:
     console = logging.StreamHandler(sys.stderr)
     console.setLevel(logging.WARNING)
     console.setFormatter(formatter)
+    console.addFilter(_ConsoleVisibilityFilter())
     console.addFilter(redactor)
     logger.addHandler(console)
 
